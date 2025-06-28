@@ -104,4 +104,4 @@ if __name__ == "__main__":
     scraper = CatalogScraper()
     courses = scraper.parse_major_requirements(url)
     for c in courses:
-        print(f"{c['code']:10} {c['title'][:30]:30} {c['credits']:4}  {c['semesters_offered']} prereqs:{c['description']} prereqs:{c['description']}")
+        print(f"{c['code']:10} {c['title'][:30]:30} {c['credits']:4}  {c['semesters_offered']} prereqs:{c['prerequisites']}")
