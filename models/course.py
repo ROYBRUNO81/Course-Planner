@@ -18,9 +18,8 @@ class Course:
         return cls(
             code=d["code"],
             title=d["title"],
-            credits=d.get("credits"),
             description=d.get("description", ""),
             semesters_offered=d.get("semesters_offered", []),
             requirements=d.get("prerequisites", []),
-            credit=d.get("credit", None),
+            credit=d.get("credits", None),
         )
