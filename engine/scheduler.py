@@ -1,4 +1,6 @@
 # engine/scheduler.py
+import sqlite3
+import json
 
 from typing import Dict, List
 from collections import defaultdict, deque
@@ -7,41 +9,208 @@ from models.course import Course
 from models.student import Student
 from models.major   import Major
 
+DB_PATH = "data/course_planner.db"
+
 class Scheduler:
-    def __init__(self, student: Student):
-        """
-        Scheduler holds onto:
-         - the Student object we’re planning for
-         - a lookup of Course.code → Course instance
-         - a prereq graph where edges point prereq → dependent course
-        """
-        self.student     = student
+    def __init__(self, student: Student, db_path: str = DB_PATH):
+        self.student = student
         self.courses: Dict[str, Course] = {}
         self.graph: Dict[str, List[str]] = defaultdict(list)
+        self.db_path = db_path
+    
+    def create_database(self):
+        """Create SQLite schema for courses, prerequisites, and student info."""
+        with sqlite3.connect(self.db_path) as conn:
+            c = conn.cursor()
+            # courses table
+            c.execute("""
+            CREATE TABLE IF NOT EXISTS courses (
+                code TEXT PRIMARY KEY,
+                title TEXT,
+                description TEXT,
+                credit REAL,
+                difficulty REAL,
+                semesters_offered TEXT,   -- JSON list
+                weekly_hours TEXT         -- JSON dict
+            )""")
+            # prereqs table
+            c.execute("""
+            CREATE TABLE IF NOT EXISTS prereqs (
+                course_code TEXT,
+                prereq_code TEXT,
+                PRIMARY KEY(course_code, prereq_code),
+                FOREIGN KEY(course_code) REFERENCES courses(code),
+                FOREIGN KEY(prereq_code) REFERENCES courses(code)
+            )""")
+            # student table
+            c.execute("""
+            CREATE TABLE IF NOT EXISTS student (
+                student_id TEXT PRIMARY KEY,
+                name TEXT,
+                school_year TEXT,
+                gpa REAL
+            )""")
+            # courses_taken
+            c.execute("""
+            CREATE TABLE IF NOT EXISTS courses_taken (
+                student_id TEXT,
+                course_code TEXT,
+                PRIMARY KEY(student_id, course_code),
+                FOREIGN KEY(student_id) REFERENCES student(student_id),
+                FOREIGN KEY(course_code) REFERENCES courses(code)
+            )""")
+            # current_semester
+            c.execute("""
+            CREATE TABLE IF NOT EXISTS current_semester (
+                student_id TEXT,
+                course_code TEXT,
+                PRIMARY KEY(student_id, course_code),
+                FOREIGN KEY(student_id) REFERENCES student(student_id),
+                FOREIGN KEY(course_code) REFERENCES courses(code)
+            )""")
+            # planned_courses
+            c.execute("""
+            CREATE TABLE IF NOT EXISTS planned_courses (
+                student_id TEXT,
+                semester_idx INTEGER,
+                course_code TEXT,
+                PRIMARY KEY(student_id, semester_idx, course_code),
+                FOREIGN KEY(student_id) REFERENCES student(student_id),
+                FOREIGN KEY(course_code) REFERENCES courses(code)
+            )""")
+            conn.commit()
+    
+    def load_all_from_db(self):
+        """Load every table back into memory structures."""
+        with sqlite3.connect(self.db_path) as conn:
+            c = conn.cursor()
+
+            # Courses + build self.courses
+            c.execute("SELECT * FROM courses")
+            for code, title, desc, credit, diff, sems_json, hours_json in c:
+                d = {
+                    "code": code,
+                    "title": title,
+                    "description": desc,
+                    "credits": credit,
+                    "prerequisites": [],  # fill next
+                    "semesters_offered": json.loads(sems_json),
+                    "weekly_hours": json.loads(hours_json),
+                    "difficulty": diff
+                }
+                self.courses[code] = Course.from_dict(d)
+
+            # Prereqs → graph + update each Course.requirements
+            c.execute("SELECT course_code, prereq_code FROM prereqs")
+            for course_code, prereq_code in c:
+                self.graph[prereq_code].append(course_code)
+                self.courses[course_code].requirements.append(prereq_code)
+
+            # Student info
+            c.execute("SELECT student_id, name, school_year, gpa FROM student")
+            row = c.fetchone()
+            if row:
+                sid, name, year, gpa = row
+                self.student.student_id = sid
+                self.student.name = name
+                self.student.school_year = year
+                self.student.gpa = gpa
+
+            # courses_taken
+            c.execute("SELECT course_code FROM courses_taken WHERE student_id=?", (self.student.student_id,))
+            self.student.courses_taken = {r[0] for r in c}
+
+            # current_semester
+            c.execute("SELECT course_code FROM current_semester WHERE student_id=?", (self.student.student_id,))
+            self.student.current_semester_courses = {r[0] for r in c}
+
+            # planned_courses
+            c.execute("SELECT semester_idx, course_code FROM planned_courses WHERE student_id=?", (self.student.student_id,))
+            for sem_idx, code in c:
+                self.student.planned_courses[sem_idx].append(code)
+    
+    def update_student_in_db(self):
+        """Insert or update the student row and all related course mappings."""
+        with sqlite3.connect(self.db_path) as conn:
+            c = conn.cursor()
+            # student table
+            c.execute("""
+                INSERT INTO student(student_id,name,school_year,gpa)
+                VALUES(?,?,?,?)
+                ON CONFLICT(student_id) DO UPDATE SET
+                  name=excluded.name,
+                  school_year=excluded.school_year,
+                  gpa=excluded.gpa
+            """, (self.student.student_id, self.student.name,
+                  self.student.school_year, self.student.gpa))
+            # courses_taken
+            c.execute("DELETE FROM courses_taken WHERE student_id=?", (self.student.student_id,))
+            c.executemany("INSERT INTO courses_taken VALUES(?,?)",
+                          [(self.student.student_id, code) for code in self.student.courses_taken])
+            # current_semester
+            c.execute("DELETE FROM current_semester WHERE student_id=?", (self.student.student_id,))
+            c.executemany("INSERT INTO current_semester VALUES(?,?)",
+                          [(self.student.student_id, code) for code in self.student.current_semester_courses])
+            # planned_courses
+            c.execute("DELETE FROM planned_courses WHERE student_id=?", (self.student.student_id,))
+            rows = []
+            for idx, sem in enumerate(self.student.planned_courses):
+                rows += [(self.student.student_id, idx, code) for code in sem]
+            c.executemany("INSERT INTO planned_courses VALUES(?,?,?)", rows)
+
+            conn.commit()
+
+    def add_or_update_course_in_db(self, course: Course):
+        """Insert or update a Course and its prereqs into the DB."""
+        with sqlite3.connect(self.db_path) as conn:
+            c = conn.cursor()
+            # courses table
+            c.execute("""
+                INSERT INTO courses(code,title,description,credit,difficulty,semesters_offered,weekly_hours)
+                VALUES(?,?,?,?,?,?,?)
+                ON CONFLICT(code) DO UPDATE SET
+                  title=excluded.title,
+                  description=excluded.description,
+                  credit=excluded.credit,
+                  difficulty=excluded.difficulty,
+                  semesters_offered=excluded.semesters_offered,
+                  weekly_hours=excluded.weekly_hours
+            """, (
+                course.code,
+                course.title,
+                course.description,
+                course.credit,
+                course.difficulty,
+                json.dumps(course.semesters_offered),
+                json.dumps(course.weekly_hours),
+            ))
+            # prereqs table
+            c.execute("DELETE FROM prereqs WHERE course_code=?", (course.code,))
+            c.executemany("INSERT INTO prereqs VALUES(?,?)",
+                          [(course.code, prereq) for prereq in course.requirements])
+            conn.commit()
 
     def load_major_from_url(self, major_url: str):
-        """
-        Scrape the provided major URL for required courses.
-        Convert each dict → Course via from_dict().
-        Update student.major.major_courses set.
-        Build prereq graph.
-        """
         scraper = CatalogScraper()
         raw_list = scraper.parse_major_requirements(major_url)
 
-        # Map codes → Course
+        # Map + DB-insert each course
         for raw in raw_list:
             course = Course.from_dict(raw)
             self.courses[course.code] = course
+            self.add_or_update_course_in_db(course)
 
-        # Update student.major
+        # Update student.major object as before
         codes = set(self.courses.keys())
         self.student.major = Major(
-            name=self.student.major.name,    
+            name=self.student.major.name,
             major_courses=codes,
             credit_required=sum(c.credit or 0 for c in self.courses.values())
         )
+        # Persist student structure (majors are implicit in planned/course tables)
+        self.update_student_in_db()
 
+        # Rebuild in-memory graph
         self.build_prereq_graph()
 
     def build_prereq_graph(self):
