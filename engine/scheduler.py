@@ -1,7 +1,7 @@
 # engine/scheduler.py
 
 from typing import Dict, List
-from collections import defaultdict
+from collections import defaultdict, deque
 from scraper.catalog_scraper import CatalogScraper
 from models.course import Course
 from models.student import Student
@@ -85,7 +85,8 @@ class Scheduler:
         student_id: str = None,
         name: str = None,
         school_year: str = None,
-        gpa: float = None
+        gpa: float = None,
+        term: str = None
     ) -> None:
         """
         Update the Student’s personal fields in-place.
@@ -98,3 +99,125 @@ class Scheduler:
             self.student.school_year = school_year
         if gpa is not None:
             self.student.gpa = gpa
+        if term is not None:
+            self.student.term = term
+
+    def edit_course(self, course_code: str, **updates) -> bool:
+        """
+        Edit fields of an existing Course in self.courses.
+
+        Parameters:
+            - course_code: the code of the course to edit (e.g. "CIS 3200")
+            - updates:      keyword args mapping Course field names to new values
+
+        Returns True if the course was found and updated, False otherwise.
+        Raises ValueError if you try to update a non-existent field.
+        """
+        code = course_code.strip().upper()
+        if code not in self.courses:
+            return False
+
+        course = self.courses[code]
+        for field_name, new_value in updates.items():
+            if not hasattr(course, field_name):
+                raise ValueError(f"Course has no field '{field_name}'")
+            setattr(course, field_name, new_value)
+
+        # If credit changed, keep the major's credit_required in sync:
+        if 'credit' in updates:
+            total = sum(self.courses[c].credit or 0 for c in self.student.major.major_courses)
+            self.student.major.credit_required = total
+
+        # If prerequisites changed, rebuild the graph:
+        if 'requirements' in updates:
+            self.build_prereq_graph()
+
+        return True
+    
+    def topo_sort(self, graph: Dict[str, List[str]]) -> List[str]:
+        """
+        Kahn’s algorithm: graph is prereq -> [dependent,...].
+        Returns a list of nodes in topo order.
+        """
+        indegree = {u: 0 for u in graph}
+        for deps in graph.values():
+            for v in deps:
+                indegree[v] = indegree.get(v, 0) + 1
+
+        q = deque([u for u, deg in indegree.items() if deg == 0])
+        result = []
+        while q:
+            u = q.popleft()
+            result.append(u)
+            for v in graph.get(u, []):
+                indegree[v] -= 1
+                if indegree[v] == 0:
+                    q.append(v)
+        return result
+
+    def generate_plan(self, current_semester_idx: int) -> float:
+        # Determine remaining courses
+        all_reqs = set(self.student.major.major_courses)
+        done = set(self.student.courses_taken) | set(self.student.current_semester_courses)
+        remaining = all_reqs - done
+
+        # Induce graph on remaining
+        induced = {u: [v for v in self.graph.get(u, []) if v in remaining]
+                   for u in remaining}
+
+        # Topo-sort
+        order = self.topo_sort(induced)
+
+        # Prepare plan, difficulty trackers, and schedule grids
+        plan = self.student.planned_courses
+        diff_sum = [0.0] * len(plan)
+        count    = [0]   * len(plan)
+        # For each semester, track scheduled slots per weekday
+        schedule_slots: List[Dict[str, List[List[int]]]] = [
+            defaultdict(list) for _ in plan
+        ]
+        terms = ["Fall", "Spring"] * ((len(plan)+1)//2)
+
+        # Place courses by descending difficulty
+        for code in sorted(order, key=lambda c: self.courses[c].difficulty, reverse=True):
+            course = self.courses[code]
+            candidates = []
+            for sem in range(current_semester_idx, len(plan)):
+                if terms[sem] not in course.semesters_offered:
+                    continue
+
+                # Check for time conflicts on every day
+                conflict = False
+                for day, interval in course.weekly_hours.items():
+                    start, end = interval
+                    for (s2, e2) in schedule_slots[sem].get(day, []):
+                        if not (end <= s2 or start >= e2):
+                            conflict = True
+                            break
+                    if conflict:
+                        break
+
+                if not conflict:
+                    candidates.append(sem)
+
+            if not candidates:
+                continue
+
+            # Choose semester with lowest current avg difficulty
+            def avg(idx): return diff_sum[idx]/count[idx] if count[idx] else 0.0
+            best = min(candidates, key=avg)
+
+            # Assign course
+            plan[best].append(code)
+            diff_sum[best] += course.difficulty
+            count[best]   += 1
+            # Register its time slots
+            for day, interval in course.weekly_hours.items():
+                schedule_slots[best][day].append(interval)
+
+        # Compute overall average difficulty
+        filled = [i for i in range(current_semester_idx, len(plan)) if count[i] > 0]
+        if not filled:
+            return 0.0
+        per_sem = [diff_sum[i]/count[i] for i in filled]
+        return sum(per_sem) / len(per_sem)
