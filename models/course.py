@@ -8,7 +8,7 @@ class Course:
     description: str
     requirements: List[str]           # e.g. IDs of prerequisite courses
     semesters_offered: List[str]      # e.g. ["Fall", "Spring"]
-    weekly_hours: Dict[str, List[int]]    # e.g. {"Lecture": 3.0, "Lab": 1.0}
+    weekly_hours: Dict[str, List[int]]   
     difficulty: float                 # scale 1.0–4.0 value
     credit: Optional[float]
 
