@@ -27,8 +27,14 @@ class CatalogScraper:
                 continue
 
             raw_code = code_td.get_text(strip=True)
+            raw_code = " ".join(raw_code.replace("\xa0", " ").split())
             # Handle cross-listings: take only the first code before any '/'
             primary_code = raw_code.split("/")[0].strip()
+
+            # Validate format
+            parts = primary_code.split()
+            if len(parts) != 2 or not parts[1].isdigit():
+                continue
 
             title   = title_td.get_text(strip=True)
             credit_text = credit_td.get_text(strip=True)
@@ -82,15 +88,23 @@ class CatalogScraper:
         # Prerequisites: third <p>
         prereqs = []
         if len(paras) > 2 and "Prerequisite" in paras[2].get_text():
-            # Extract all course links
+            # 1) Try to grab the bubblelink codes
             links = paras[2].select("a.bubblelink.code")
             if links:
-                prereqs = [a.get_text(strip=True).replace("\xa0", " ") for a in links]
+                prereqs = []
+                for a in links:
+                    raw = a.get_text()
+                    # Replace non-breaking spaces, collapse whitespace
+                    clean = " ".join(raw.replace("\xa0", " ").split())
+                    prereqs.append(clean)
             else:
-                # Fallback: regex scan for codes
+                # 2) Fallback: regex scan for codes like "ABCD 1234"
                 text = paras[2].get_text()
                 matches = re.findall(r"[A-Z]{2,4}\s*\d{4}", text)
-                prereqs = [m.strip() for m in matches]
+                prereqs = []
+                for m in matches:
+                    clean = " ".join(m.replace("\xa0", " ").split())
+                    prereqs.append(clean)
 
         return {
             "description": description,
