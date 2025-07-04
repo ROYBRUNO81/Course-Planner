@@ -390,3 +390,71 @@ class Scheduler:
             return 0.0
         per_sem = [diff_sum[i]/count[i] for i in filled]
         return sum(per_sem) / len(per_sem)
+
+if __name__ == "__main__":
+    # 1. Setup a dummy Student
+    student = Student(
+        student_id="S12345",
+        name="Test Student",
+        school_year="Sophomore",
+        major=Major(name="Computer Science, BSE", major_courses=set(), credit_required=0),
+        courses_taken=set(["CIS 1100"]),      # assume already took intro CS
+        current_semester_courses=set(["CIS 1200"]),  # currently enrolled
+    )
+
+    sched = Scheduler(student)
+    print("• Creating database…")
+    sched.create_database()
+
+    url = "https://catalog.upenn.edu/undergraduate/programs/computer-science-bse/"
+
+    # 2. Load major (scrape + insert into DB + in-memory)
+    print(f"• Loading major from {url}")
+    sched.load_major_from_url(url)
+    print(f"  → {len(sched.courses)} courses loaded.")
+
+    # 3. Reload everything from DB to verify persistence
+    print("• Reloading all data from DB…")
+    sched.load_all_from_db()
+    print(f"  → Student: {sched.student.student_id}, {sched.student.name}, Year: {sched.student.school_year}")
+    print(f"  → Taken: {sched.student.courses_taken}")
+    print(f"  → Current sem: {sched.student.current_semester_courses}")
+    print(f"  → Major courses: {len(sched.student.major.major_courses)} codes")
+
+    # 4. Test add_course (scrape one extra course dict manually)
+    extra = {
+        "code": "TEST 0001",
+        "title": "Dummy Test Course",
+        "description": "A dummy course for testing.",
+        "credits": 1.0,
+        "prerequisites": [],
+        "semesters_offered": ["Fall"],
+        "weekly_hours": {"Monday": [900, 1000]},
+        "difficulty": 2.5
+    }
+    print("• Adding new course TEST 0001…", sched.add_course(extra))
+    sched.add_or_update_course_in_db(Course.from_dict(extra))
+
+    # 5. Test add_major_course
+    print("• Adding TEST 0001 to major…", sched.add_major_course("TEST 0001"))
+    print(f"  → New credit_required: {sched.student.major.credit_required}")
+
+    # 6. Test edit_student_info
+    print("• Editing student info…")
+    sched.edit_student_info(name="Updated Student", school_year="Junior", gpa=3.9)
+    sched.update_student_in_db()
+    print(f"  → New name/year/gpa: {sched.student.name}, {sched.student.school_year}, {sched.student.gpa}")
+
+    # 7. Test edit_course
+    print("• Editing TEST 0001 difficulty to 3.0…", sched.edit_course("TEST 0001", difficulty=3.0))
+    sched.add_or_update_course_in_db(sched.courses["TEST 0001"])
+
+    # 8. Test toposort helper
+    print("• Topo sort of current graph (first 10):", sched.topo_sort(sched.graph)[:10])
+
+    # 9. Test generate_plan from semester index 2
+    avg_diff = sched.generate_plan(current_semester_idx=2)
+    print("• Generated plan (semesters 3–8):")
+    for idx, sem in enumerate(sched.student.planned_courses, start=1):
+        print(f"  Sem {idx}: {sem}")
+    print(f"• Overall average difficulty (sem 3+): {avg_diff:.2f}")
