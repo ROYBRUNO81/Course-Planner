@@ -7,6 +7,7 @@ class CatalogScraper:
         self.search_base = "https://catalog.upenn.edu/search/?search="
 
     def parse_major_requirements(self, major_url: str):
+        import re
         resp = requests.get(major_url)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
@@ -77,34 +78,36 @@ class CatalogScraper:
         # Description is the first paragraph
         description = paras[0].get_text(strip=True) if len(paras) > 0 else ""
 
-        # Semester offerings 
+         # 2) Semesters offered is the first <p> containing Fall/Spring/Summer
         semesters = []
-        if len(paras) > 1:
-            sem_text = paras[1].get_text(strip=True)
-            for term in ("Fall", "Spring", "Summer"):
-                if term in sem_text:
-                    semesters.append(term)
+        for p in paras:
+            txt = p.get_text(strip=True)
+            if any(term in txt for term in ("Fall", "Spring", "Summer")):
+                semesters = [t for t in ("Fall", "Spring", "Summer") if t in txt]
+                break
 
-        # Prerequisites: third <p>
+        # 3) Prerequisites: find the <p> whose text starts with "Prerequisite"
         prereqs = []
-        if len(paras) > 2 and "Prerequisite" in paras[2].get_text():
-            # 1) Try to grab the bubblelink codes
-            links = paras[2].select("a.bubblelink.code")
-            if links:
-                prereqs = []
-                for a in links:
-                    raw = a.get_text()
-                    # Replace non-breaking spaces, collapse whitespace
-                    clean = " ".join(raw.replace("\xa0", " ").split())
-                    prereqs.append(clean)
-            else:
-                # 2) Fallback: regex scan for codes like "ABCD 1234"
-                text = paras[2].get_text()
-                matches = re.findall(r"[A-Z]{2,4}\s*\d{4}", text)
-                prereqs = []
-                for m in matches:
-                    clean = " ".join(m.replace("\xa0", " ").split())
-                    prereqs.append(clean)
+        for p in paras:
+            txt = p.get_text(strip=True)
+            if txt.startswith("Prerequisite"):
+                # extract linked codes first
+                links = p.select("a.bubblelink.code")
+                if links:
+                    prereqs = [a.get_text(strip=True).replace("\xa0", " ") for a in links]
+                else:
+                    # fallback by regex
+                    matches = re.findall(r"[A-Z]{2,4}\s*\d{4}", txt)
+                    prereqs = [m.strip() for m in matches]
+                break  # stop after the first Prerequisite
+
+        # 4) Credits: last <p>, extract numeric
+        credit = None
+        if paras:
+            last = paras[-1].get_text(strip=True)
+            m = re.search(r"(\d+(\.\d+)?)", last)
+            if m:
+                credit = float(m.group(1))
 
         return {
             "description": description,

@@ -328,71 +328,76 @@ class Scheduler:
         return result
 
     def generate_plan(self, current_semester_idx: int) -> float:
-        # Determine remaining courses
+        """
+        Fill self.student.planned_courses from current_semester_idx onward,
+        respecting prereqs, avoiding weekly time conflicts, and balancing
+        total credits per semester. Returns the overall average credits load
+        across those semesters.
+        """
+        # 1) Figure out which courses still need scheduling
         all_reqs = set(self.student.major.major_courses)
-        done = set(self.student.courses_taken) | set(self.student.current_semester_courses)
+        done      = set(self.student.courses_taken) | set(self.student.current_semester_courses)
         remaining = all_reqs - done
 
-        # Induce graph on remaining
+        # 2) Build induced prereq graph and topo-sort it
         induced = {u: [v for v in self.graph.get(u, []) if v in remaining]
                    for u in remaining}
-
-        # Topo-sort
         order = self.topo_sort(induced)
 
-        # Prepare plan, difficulty trackers, and schedule grids
-        plan = self.student.planned_courses
-        diff_sum = [0.0] * len(plan)
-        count    = [0]   * len(plan)
-        # For each semester, track scheduled slots per weekday
+        # 3) Prepare per-semester data
+        plan        = self.student.planned_courses
+        credit_sum  = [0.0] * len(plan)
+        # track scheduled slots per weekday to avoid clashes
         schedule_slots: List[Dict[str, List[List[int]]]] = [
             defaultdict(list) for _ in plan
         ]
+        # assume alternating Fall / Spring
         terms = ["Fall", "Spring"] * ((len(plan)+1)//2)
 
-        # Place courses by descending difficulty
-        for code in sorted(order, key=lambda c: self.courses[c].difficulty, reverse=True):
+        # 4) Greedily assign each course in topo order
+        for code in order:
             course = self.courses[code]
+            best_sem = None
+            # find candidate semesters
             candidates = []
             for sem in range(current_semester_idx, len(plan)):
                 if terms[sem] not in course.semesters_offered:
                     continue
 
-                # Check for time conflicts on every day
+                # check weekly‐time conflicts
                 conflict = False
-                for day, interval in course.weekly_hours.items():
-                    start, end = interval
+                for day, (start, end) in course.weekly_hours.items():
                     for (s2, e2) in schedule_slots[sem].get(day, []):
                         if not (end <= s2 or start >= e2):
                             conflict = True
                             break
                     if conflict:
                         break
-
                 if not conflict:
                     candidates.append(sem)
 
             if not candidates:
+                # no valid slot—skip for now
                 continue
 
-            # Choose semester with lowest current avg difficulty
-            def avg(idx): return diff_sum[idx]/count[idx] if count[idx] else 0.0
-            best = min(candidates, key=avg)
+            # pick the semester with the smallest total credits so far
+            best_sem = min(candidates, key=lambda i: credit_sum[i])
 
-            # Assign course
-            plan[best].append(code)
-            diff_sum[best] += course.difficulty
-            count[best]   += 1
-            # Register its time slots
+            # assign the course
+            plan[best_sem].append(code)
+            credit_sum[best_sem] += course.credit or 0.0
+
+            # record its weekly slots
             for day, interval in course.weekly_hours.items():
-                schedule_slots[best][day].append(interval)
+                schedule_slots[best_sem][day].append(interval)
 
-        # Compute overall average difficulty
-        filled = [i for i in range(current_semester_idx, len(plan)) if count[i] > 0]
+        # 5) compute and return the average credit load over filled semesters
+        filled = [i for i in range(current_semester_idx, len(plan)) if credit_sum[i] > 0]
         if not filled:
             return 0.0
-        per_sem = [diff_sum[i]/count[i] for i in filled]
-        return sum(per_sem) / len(per_sem)
+        avg_credits = sum(credit_sum[i] for i in filled) / len(filled)
+        return avg_credits
+
 
 if __name__ == "__main__":
     # 1. Setup a dummy Student
@@ -419,7 +424,7 @@ if __name__ == "__main__":
 
     print("Current courses and prerequisites:")
     for code, course in sched.courses.items():
-        print(f"{code}: {course.requirements}")
+        print(f"{code}: {course.credit} credits, {course.requirements}")
     
     print("graph of prerequisites:")
     for u, deps in sched.graph.items():
@@ -432,6 +437,7 @@ if __name__ == "__main__":
     print(f"Taken: {sched.student.courses_taken}")
     print(f"Current sem: {sched.student.current_semester_courses}")
     print(f"Major courses: {len(sched.student.major.major_courses)} codes")
+    print(f"Credit required: {sched.student.major.credit_required:.2f}")
 
     # 4. Test add_course (scrape one extra course dict manually)
     extra = {
@@ -465,8 +471,8 @@ if __name__ == "__main__":
     print("Topo sort of current graph (first 10):", sched.topo_sort(sched.graph)[:10])
 
     # 9. Test generate_plan from semester index 2
-    avg_diff = sched.generate_plan(current_semester_idx=2)
+    avg_credits = sched.generate_plan(current_semester_idx=2)
     print("Generated plan (semesters 3–8):")
     for idx, sem in enumerate(sched.student.planned_courses, start=1):
         print(f"  Sem {idx}: {sem}")
-    print(f"Overall average difficulty (sem 3+): {avg_diff:.2f}")
+    print(f"Overall average credits (sem 3+): {avg_credits:.2f}")
