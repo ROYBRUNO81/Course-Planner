@@ -48,7 +48,8 @@ class Scheduler:
                 student_id TEXT PRIMARY KEY,
                 name TEXT,
                 school_year TEXT,
-                gpa REAL
+                gpa REAL,
+                term TEXT
             )""")
             # courses_taken
             c.execute("""
@@ -107,14 +108,15 @@ class Scheduler:
                 self.courses[course_code].requirements.append(prereq_code)
 
             # Student info
-            c.execute("SELECT student_id, name, school_year, gpa FROM student")
+            c.execute("SELECT student_id, name, school_year, gpa, term FROM student")
             row = c.fetchone()
             if row:
-                sid, name, year, gpa = row
+                sid, name, year, gpa, term = row
                 self.student.student_id = sid
                 self.student.name = name
                 self.student.school_year = year
                 self.student.gpa = gpa
+                self.student.term = term
 
             # courses_taken
             c.execute("SELECT course_code FROM courses_taken WHERE student_id=?", (self.student.student_id,))
@@ -135,14 +137,15 @@ class Scheduler:
             c = conn.cursor()
             # student table
             c.execute("""
-                INSERT INTO student(student_id,name,school_year,gpa)
-                VALUES(?,?,?,?)
+                INSERT INTO student(student_id,name,school_year,gpa, term)
+                VALUES(?,?,?,?,?)
                 ON CONFLICT(student_id) DO UPDATE SET
                   name=excluded.name,
                   school_year=excluded.school_year,
-                  gpa=excluded.gpa
+                  gpa=excluded.gpa,
+                  term=excluded.term
             """, (self.student.student_id, self.student.name,
-                  self.student.school_year, self.student.gpa))
+                  self.student.school_year, self.student.gpa, self.student.term))
             # courses_taken
             c.execute("DELETE FROM courses_taken WHERE student_id=?", (self.student.student_id,))
             c.executemany("INSERT INTO courses_taken VALUES(?,?)",
@@ -394,26 +397,27 @@ class Scheduler:
 if __name__ == "__main__":
     # 1. Setup a dummy Student
     student = Student(
-        student_id="S12345",
-        name="Test Student",
-        school_year="Sophomore",
-        major=Major(name="Computer Science, BSE", major_courses=set(), credit_required=0),
-        courses_taken=set(["CIS 1100"]),      # assume already took intro CS
-        current_semester_courses=set(["CIS 1200"]),  # currently enrolled
+        student_id="",
+        name="",
+        school_year="",
+        major=Major(name="", major_courses=set(), credit_required=0),
+        courses_taken=set([""]),      # assume already took intro CS
+        current_semester_courses=set([""]),  # currently enrolled
+        term=""
     )
 
     sched = Scheduler(student)
-    print("• Creating database…")
-    sched.create_database()
+    # print("• Creating database…")
+    # sched.create_database()
 
-    url = "https://catalog.upenn.edu/undergraduate/programs/computer-science-bse/"
+    # url = "https://catalog.upenn.edu/undergraduate/programs/computer-science-bse/"
 
-    # 2. Load major (scrape + insert into DB + in-memory)
-    print(f"• Loading major from {url}")
-    sched.load_major_from_url(url)
-    print(f"  → {len(sched.courses)} courses loaded.")
+    # # 2. Load major (scrape + insert into DB + in-memory)
+    # print(f"• Loading major from {url}")
+    # sched.load_major_from_url(url)
+    # print(f"  → {len(sched.courses)} courses loaded.")
 
-    # 3. Reload everything from DB to verify persistence
+    # # 3. Reload everything from DB to verify persistence
     print("• Reloading all data from DB…")
     sched.load_all_from_db()
     print(f"  → Student: {sched.student.student_id}, {sched.student.name}, Year: {sched.student.school_year}")

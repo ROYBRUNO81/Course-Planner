@@ -22,4 +22,6 @@ class Course:
             semesters_offered=d.get("semesters_offered", []),
             requirements=d.get("prerequisites", []),
             credit=d.get("credits", None),
+            weekly_hours=d.get("weekly_hours", {}),
+            difficulty=d.get("difficulty", 0.0)
         )
